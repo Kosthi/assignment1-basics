@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable
+from collections import defaultdict
 from typing import IO, Any, BinaryIO
 
 import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
+import regex as re
+import cppyy
 
 
 def run_linear(
@@ -562,31 +565,66 @@ def get_tokenizer(
     raise NotImplementedError
 
 
+# 读取 bpe 的 cpp 实现代码
+cpp_source_path = os.path.join(os.path.dirname(__file__), "bpe_train.cpp")
+with open(cpp_source_path, "r") as f:
+    cpp_code = f.read()
+
+# Compile C++ code
+cppyy.cppdef(cpp_code)
+
+
 def run_train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
     special_tokens: list[str],
     **kwargs,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-    """Given the path to an input corpus, run train a BPE tokenizer and
-    output its vocabulary and merges.
+    with open(input_path, "r", encoding="utf-8") as f:
+        text = f.read()
 
-    Args:
-        input_path (str | os.PathLike): Path to BPE tokenizer training data.
-        vocab_size (int): Total number of items in the tokenizer's vocabulary (including special tokens).
-        special_tokens (list[str]): A list of string special tokens to be added to the tokenizer vocabulary.
-            These strings will never be split into multiple tokens, and will always be
-            kept as a single token. If these special tokens occur in the `input_path`,
-            they are treated as any other string.
+    # 预分词
+    # 1. 按照特殊标记分割文档
+    if special_tokens:
+        # 先转义再分割多个特殊标记
+        pattern = "|".join(re.escape(token) for token in special_tokens)
+        # 分割文档，保留特殊标记
+        parts = re.split(f"({pattern})", text)
+        # print(parts)
+    else:
+        parts = [text]
 
-    Returns:
-        tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-            vocab:
-                The trained tokenizer vocabulary, a mapping from int (token ID in the vocabulary)
-                to bytes (token bytes)
-            merges:
-                BPE merges. Each list item is a tuple of bytes (<token1>, <token2>),
-                representing that <token1> was merged with <token2>.
-                Merges are ordered by order of creation.
-    """
-    raise NotImplementedError
+    # 2. GPT-2 Regex splitting on non-special parts
+    gpt2_pat = re.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
+
+    word_counts = defaultdict(int)
+    special_tokens_set = set(special_tokens)
+
+    for part in parts:
+        # 跳过含有特殊标记的部分
+        if part in special_tokens_set:
+            continue
+        # 找到匹配的
+        words = gpt2_pat.findall(part)
+        for word in words:
+            # We encode to UTF-8 bytes because C++ expects bytes
+            # 编码为 utf8 记录到字典中
+            word_counts[word.encode("utf-8")] += 1
+
+    # 统计词和词频
+    distinct_words = list(word_counts.keys())
+    counts = list(word_counts.values())
+
+    # 调用cpp
+    result = cppyy.gbl.bpe.train(distinct_words, counts, vocab_size, special_tokens)
+
+    # 将结果转为 Python 里的 bytes
+    vocab = {}
+    for item in result.vocab:
+        vocab[item.first] = bytes(item.second)
+
+    merges = []
+    for p in result.merges:
+        merges.append((bytes(p.first), bytes(p.second)))
+
+    return vocab, merges

@@ -80,10 +80,6 @@ namespace bpe {
         struct ThreadLocal {
             // 每个线程本地统计的pair频率
             std::unordered_map<std::pair<int, int>, int, PairHash> local_counts;
-            // 每个线程本地统计的pair位置
-            std::unordered_map<std::pair<int, int>,
-                std::vector<std::pair<size_t, size_t> >,
-                PairHash> local_positions;
         };
 
     public:

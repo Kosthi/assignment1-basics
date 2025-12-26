@@ -2,7 +2,7 @@ import json
 import time
 
 from .adapters import run_train_bpe
-from .common import FIXTURES_PATH, gpt2_bytes_to_unicode
+from .common import FIXTURES_PATH, gpt2_bytes_to_unicode, DATA_PATH
 import json
 import os
 import time
@@ -135,7 +135,7 @@ def test_train_bpe_tinystories(snapshot):
     merged with other tokens.
     """
     # return
-    input_path = FIXTURES_PATH / "TinyStoriesV2-GPT4-train.txt"
+    input_path = DATA_PATH / "TinyStoriesV2-GPT4-train.txt"
 
     print("=" * 60)
     print("🧪 开始 BPE 训练测试")

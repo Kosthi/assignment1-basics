@@ -1,0 +1,436 @@
+#include "bpe.hpp"
+
+#include <iostream>
+#include <vector>
+#include <string>
+#include <map>
+#include <unordered_map>
+#include <algorithm>
+#include <iterator>
+#include <assert.h>
+#include <queue>
+#include <omp.h>
+
+namespace bpe {
+    // 自定义哈希函数，用于将std::pair<int, int>作为unordered_map的键
+    struct PairHash {
+        std::size_t operator()(const std::pair<int, int> &p) const {
+            // 将两个int的哈希值组合成一个哈希值
+            return std::hash<int>()(p.first) ^ (std::hash<int>()(p.second) << 1);
+        }
+    };
+
+    // BPE训练器主类
+    class BPETrainer {
+    private:
+        // 词汇表：从token ID到字节串的映射
+        std::map<int, Bytes> vocab;
+
+        // 单词列表：每个单词表示为token ID的序列
+        std::vector<std::vector<int> > words;
+
+        // 每个单词的频率计数
+        std::vector<int> word_counts;
+
+        // 下一个可用的token ID
+        int next_id = 0;
+
+        // 记录每个pair的频率
+        std::unordered_map<std::pair<int, int>, int, PairHash> pair_counts;
+
+        // 优先级队列中使用的pair信息结构
+        struct PairInfo {
+            std::pair<int, int> pair; // token对
+            int count; // 该pair出现的频率
+        };
+
+        // 优先级队列的比较器，用于确定哪个pair应该优先合并
+        struct PairComparator {
+            const std::map<int, Bytes> *vocab; // 指向词汇表的指针
+
+            explicit PairComparator(const std::map<int, Bytes> *v) : vocab(v) {
+            }
+
+            bool operator()(const PairInfo &a, const PairInfo &b) const {
+                // 优先频率高的pair（注意：这是最大堆，返回true表示a的优先级低于b）
+                if (a.count != b.count) return a.count < b.count;
+
+                // 频率相同时，按照pair对应的字符串的字典序比较
+                // 先比较第一个token的字符串
+                if (a.pair.first != b.pair.first)
+                    return vocab->at(a.pair.first) < vocab->at(b.pair.first);
+
+                // 第一个token相同时，比较第二个token的字符串
+                return vocab->at(a.pair.second) < vocab->at(b.pair.second);
+            }
+        };
+
+        // 优先级队列，用于快速找到频率最高的pair
+        std::priority_queue<PairInfo, std::vector<PairInfo>, PairComparator> pair_queue;
+
+        // 索引结构：记录每个pair在哪些单词的什么位置出现
+        // 键：pair
+        // 值：向量，每个元素是(单词索引, 在该单词中的位置)
+        // 注意：这里记录的是pair中第一个token的位置
+        std::unordered_map<std::pair<int, int>,
+            std::vector<std::pair<size_t, size_t> >, // (word_idx, position)
+            PairHash> pair_positions;
+
+        // 用于并行处理的线程本地数据结构
+        struct ThreadLocal {
+            // 每个线程本地统计的pair频率
+            std::unordered_map<std::pair<int, int>, int, PairHash> local_counts;
+            // 每个线程本地统计的pair位置
+            std::unordered_map<std::pair<int, int>,
+                std::vector<std::pair<size_t, size_t> >,
+                PairHash> local_positions;
+        };
+
+    public:
+        // 构造函数：初始化BPE训练器
+        BPETrainer(const std::vector<std::string> &distinct_words,
+                   const std::vector<int> &counts)
+            : next_id(256), pair_queue(PairComparator(&vocab)) {
+            // 初始化词汇表：前256个ID对应单个字节
+            for (int i = 0; i < 256; ++i) {
+                vocab[i] = Bytes(1, static_cast<char>(i));
+            }
+
+            // 将单词转换为token序列
+            words.reserve(distinct_words.size());
+            word_counts = counts; // 复制单词频率
+
+            for (const auto &word: distinct_words) {
+                std::vector<int> token_ids;
+                token_ids.reserve(word.size());
+
+                // 将每个字符转换为对应的token ID（0-255）
+                for (char ch: word) {
+                    token_ids.emplace_back(static_cast<unsigned char>(ch));
+                }
+
+                words.emplace_back(std::move(token_ids));
+            }
+
+            // 构建初始的pair统计信息
+            // single_build_initial_counts();
+            build_initial_counts();
+        }
+
+    private:
+        // 辅助函数：在单词中从指定位置向后查找下一个有效token的位置
+        static int get_next_pos(const std::vector<int> &word, int pos) {
+            for (int i = pos + 1; i < word.size(); ++i) {
+                if (word[i] != -1) return i; // -1表示该token已被合并
+            }
+            return -1; // 没有找到有效token
+        }
+
+        // 辅助函数：在单词中从指定位置向前查找上一个有效token的位置
+        static int get_prev_pos(const std::vector<int> &word, int pos) {
+            for (int i = pos - 1; i >= 0; --i) {
+                if (word[i] != -1) return i; // -1表示该token已被合并
+            }
+            return -1; // 没有找到有效token
+        }
+
+        // build_initial_counts 串行版本
+        void single_build_initial_counts() {
+            // 清空现有数据
+            pair_counts.clear();
+            pair_positions.clear();
+
+            std::priority_queue<PairInfo, std::vector<PairInfo>, PairComparator>
+                    empty_queue{PairComparator(&vocab)};
+            pair_queue.swap(empty_queue);
+
+            // 直接串行处理
+            for (size_t i = 0; i < words.size(); ++i) {
+                const auto &word = words[i];
+                int count = word_counts[i];
+
+                if (word.empty()) continue;
+
+                // 直接遍历所有有效位置
+                for (size_t curr = 0; curr < word.size(); ++curr) {
+                    if (word[curr] == -1) continue;
+
+                    // 找到下一个有效位置
+                    size_t next = curr + 1;
+                    while (next < word.size() && word[next] == -1) {
+                        ++next;
+                    }
+
+                    if (next >= word.size()) break;
+
+                    std::pair<int, int> p = {word[curr], word[next]};
+                    pair_counts[p] += count;
+                    pair_positions[p].emplace_back(i, curr);
+
+                    curr = next - 1; // 循环会自增
+                }
+            }
+
+            // 将所有pair添加到优先级队列中
+            for (const auto &entry: pair_counts) {
+                pair_queue.push({entry.first, entry.second});
+            }
+        }
+
+        // 构建初始的pair统计信息 并行版本
+        void build_initial_counts() {
+            // 清空现有数据
+            pair_counts.clear();
+            pair_positions.clear();
+
+            // 清空优先级队列（通过与空队列交换）
+            std::priority_queue<PairInfo, std::vector<PairInfo>, PairComparator>
+                    empty_queue{PairComparator(&vocab)};
+            pair_queue.swap(empty_queue);
+
+            // 使用OpenMP进行并行计数
+            std::vector<ThreadLocal> thread_locals;
+
+#pragma omp parallel
+            {
+                // 单线程执行：分配线程本地存储空间
+#pragma omp single
+                thread_locals.resize(omp_get_num_threads());
+
+                // 获取当前线程的本地存储
+                ThreadLocal &local = thread_locals[omp_get_thread_num()];
+                local.local_counts.clear();
+
+                // 并行处理所有单词
+#pragma omp for schedule(static)
+                for (size_t i = 0; i < words.size(); ++i) {
+                    const auto &word = words[i];
+                    int count = word_counts[i]; // 当前单词的频率
+
+                    if (word.empty()) continue; // 跳过空单词
+
+                    int curr = -1;
+                    // 找到第一个有效token
+                    for (size_t k = 0; k < word.size(); ++k) {
+                        if (word[k] != -1) {
+                            curr = k;
+                            break;
+                        }
+                    }
+
+                    if (curr == -1) continue; // 没有有效token
+
+                    // 遍历单词中的所有相邻token对
+                    while (true) {
+                        int next = get_next_pos(word, curr);
+                        if (next == -1) break; // 没有下一个token
+
+                        std::pair<int, int> p = {word[curr], word[next]};
+
+                        // 在线程本地统计中增加该pair的频率
+                        local.local_counts[p] += count;
+
+                        // 临界区：记录该pair的位置信息
+#pragma omp critical
+                        {
+                            pair_positions[p].emplace_back(i, curr);
+                        }
+
+                        curr = next; // 移动到下一个token
+                    }
+                }
+
+                // 合并线程本地的统计到全局统计
+#pragma omp critical
+                {
+                    for (const auto &entry: local.local_counts) {
+                        pair_counts[entry.first] += entry.second;
+                    }
+                }
+            }
+
+            // 将所有pair添加到优先级队列中
+            for (const auto &entry: pair_counts) {
+                pair_queue.push({entry.first, entry.second});
+            }
+        }
+
+        // 合并一对token并更新相关统计信息
+        void merge_and_update(size_t word_idx, size_t pos, int new_id, const std::pair<int, int> &old_pair) {
+            auto &word = words[word_idx];
+            int count = word_counts[word_idx]; // 当前单词的频率
+
+            // 获取相邻token的位置
+            int prev_pos = get_prev_pos(word, pos); // 前一个token的位置
+            int next_pos = get_next_pos(word, pos); // 当前pair中第二个token的位置
+
+            // 1. 删除左相邻pair（prev_token, old_first_token）
+            if (prev_pos != -1) {
+                std::pair<int, int> left_pair = {word[prev_pos], old_pair.first};
+                pair_counts[left_pair] -= count; // 减少频率
+                if (pair_counts[left_pair] <= 0) {
+                    pair_counts.erase(left_pair); // 如果频率为0，删除该pair
+                } else {
+                    // 更新后的频率推入队列（旧条目通过惰性删除处理）
+                    pair_queue.push({left_pair, pair_counts[left_pair]});
+                }
+            }
+
+            // 找到第三个token的位置（跳过被合并的第二个token）
+            int third_pos = get_next_pos(word, next_pos);
+
+            // 2. 删除右相邻pair（old_second_token, third_token）
+            if (third_pos != -1) {
+                std::pair<int, int> right_pair = {old_pair.second, word[third_pos]};
+                pair_counts[right_pair] -= count;
+                if (pair_counts[right_pair] <= 0) {
+                    pair_counts.erase(right_pair);
+                } else {
+                    pair_queue.push({right_pair, pair_counts[right_pair]});
+                }
+            }
+
+            // 3. 合并tokens：用new_id替换第一个token，将第二个token标记为已删除(-1)
+            word[pos] = new_id;
+            word[next_pos] = -1;
+
+            // 4. 添加新的左相邻pair（prev_token, new_token）
+            if (prev_pos != -1) {
+                std::pair<int, int> new_left = {word[prev_pos], new_id};
+                pair_counts[new_left] += count; // 增加频率
+                pair_positions[new_left].emplace_back(word_idx, prev_pos); // 记录位置
+                pair_queue.push({new_left, pair_counts[new_left]}); // 推入队列
+            }
+
+            // 5. 添加新的右相邻pair（new_token, third_token）
+            if (third_pos != -1) {
+                std::pair<int, int> new_right = {new_id, word[third_pos]};
+                pair_counts[new_right] += count;
+                pair_positions[new_right].emplace_back(word_idx, pos); // 注意：这里记录的是新token的位置
+                pair_queue.push({new_right, pair_counts[new_right]});
+            }
+        }
+
+        // 合并指定的pair
+        void merge_pair(const std::pair<int, int> &pair, int new_id,
+                        std::vector<std::pair<Bytes, Bytes> > &merges) {
+            // 1. 更新词汇表：为新token创建字符串表示
+            vocab[new_id] = vocab[pair.first] + vocab[pair.second];
+            // 记录这次合并（用于最终输出）
+            merges.emplace_back(vocab[pair.first], vocab[pair.second]);
+
+            // 2. 获取该pair在所有单词中出现的位置
+            auto positions = pair_positions[pair];
+
+            // 3. 遍历所有出现位置并合并
+            for (const auto &[word_idx, pos]: positions) {
+                auto &word = words[word_idx];
+
+                // 验证当前位置的pair是否仍然是我们要合并的pair
+                // （因为之前的合并可能已经改变了这个位置）
+                if (word[pos] != pair.first) continue;
+                int next_pos = get_next_pos(word, pos);
+                if (next_pos == -1 || word[next_pos] != pair.second) continue;
+
+                // 合并并更新统计信息
+                merge_and_update(word_idx, pos, new_id, pair);
+            }
+
+            // 4. 清理已合并pair的记录
+            pair_positions.erase(pair);
+            pair_counts.erase(pair);
+        }
+
+    public:
+        // 主训练函数
+        Result train(int vocab_size, const std::vector<std::string> &special_tokens) {
+            std::vector<std::pair<Bytes, Bytes> > merges; // 记录所有的合并操作
+
+            // 计算目标词汇表大小（减去特殊token）
+            // 注意：需要确保vocab_size大于特殊token的数量
+            size_t target_base_vocab_size = vocab_size - special_tokens.size();
+
+            // 持续合并直到达到目标词汇表大小
+            while (vocab.size() < target_base_vocab_size) {
+                // 如果优先级队列为空，重新构建统计信息
+                if (pair_queue.empty()) {
+                    // single_build_initial_counts();
+                    build_initial_counts();
+
+                    if (pair_queue.empty()) break; // 如果没有可合并的pair，结束
+                }
+
+                PairInfo best_info;
+                bool found_valid = false;
+
+                // 从优先级队列中查找有效的、频率最高的pair
+                // 由于惰性删除，队列中可能包含过期的条目，相比重建队列只需要 O(KlogN)
+                while (!pair_queue.empty()) {
+                    best_info = pair_queue.top();
+                    pair_queue.pop();
+
+                    // 检查该pair是否仍然有效（频率与当前统计匹配）
+                    auto it = pair_counts.find(best_info.pair);
+                    if (it != pair_counts.end() && it->second == best_info.count) {
+                        found_valid = true;
+                        break;
+                    }
+                }
+
+                // 如果找不到有效pair，可以尝试重新构建统计信息
+                if (!found_valid) {
+                    // single_build_initial_counts();
+                    build_initial_counts();
+                    if (pair_queue.empty()) break; // 如果没有可合并的pair，结束
+                }
+
+                // 合并最佳的pair
+                int new_id = next_id++; // 分配新的token ID
+                merge_pair(best_info.pair, new_id, merges);
+            }
+
+            // 添加特殊tokens到词汇表
+            for (const auto &token: special_tokens) {
+                vocab[next_id++] = token;
+            }
+
+            // 返回训练结果：词汇表和合并记录
+            return {vocab, merges};
+        }
+    };
+
+    // 对外的训练接口函数
+    Result train(
+        const std::vector<std::string> &distinct_words, // 去重后的单词列表
+        const std::vector<int> &counts, // 对应单词的频率
+        int vocab_size, // 目标词汇表大小
+        const std::vector<std::string> &special_tokens // 特殊token列表
+    ) {
+        // 创建训练器实例并开始训练
+        BPETrainer trainer(distinct_words, counts);
+        return trainer.train(vocab_size, special_tokens);
+    }
+}
+
+// Example usage
+int main() {
+    std::vector<std::string> words = {"low", "lower", "widest", "newest"};
+    std::vector<int> counts = {5, 2, 3, 6}; // Frequencies of distinct words
+
+    std::vector<std::string> special_tokens = {"<pad>"};
+
+    // Train with optimized version
+    auto result = bpe::train(words, counts, 263, special_tokens);
+
+    std::cout << "Vocabulary size: " << result.vocab.size() << std::endl;
+    std::cout << "Number of merges: " << result.merges.size() << std::endl;
+
+    // Print first 10 merges
+    for (int i = 0; i < std::min(10, (int) result.merges.size()); ++i) {
+        std::cout << "Merge " << i << ": "
+                << result.merges[i].first << " + "
+                << result.merges[i].second << std::endl;
+    }
+
+    return 0;
+}

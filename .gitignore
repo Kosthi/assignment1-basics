@@ -161,3 +161,9 @@ cython_debug/
 
 .ruff_cache/
 *.zip
+
+**/.DS_Store
+.idea
+.vscode
+data/
+test_results/

@@ -290,7 +290,7 @@ def run_transformer_lm(
     weights: dict[str, Tensor],
     in_indices: Int[Tensor, " batch_size sequence_length"],
 ) -> Float[Tensor, " batch_size sequence_length vocab_size"]:
-    """Given the weights of a Transformer language model and input indices,
+    r"""Given the weights of a Transformer language model and input indices,
     return the output of running a forward pass on the input indices.
 
     This function should use RoPE.
@@ -565,60 +565,50 @@ def get_tokenizer(
     raise NotImplementedError
 
 
-# 读取 bpe 的 cpp 实现代码
-cpp_source_path = os.path.join(os.path.dirname(__file__), "bpe_train.cpp")
-with open(cpp_source_path, "r") as f:
-    cpp_code = f.read()
-
-# Compile C++ code
-cppyy.cppdef(cpp_code)
-
-
 def run_train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
     special_tokens: list[str],
     **kwargs,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-    with open(input_path, "r", encoding="utf-8") as f:
-        text = f.read()
+    """
+    Train BPE on the given input file.
+    """
+    # Set OMP_NUM_THREADS=1 to avoid segmentation faults with OpenMP in C++
+    # This is necessary because of potential conflicts between Python/cppyy and OpenMP threading,
+    # or stack size limits in worker threads.
+    os.environ["OMP_NUM_THREADS"] = "1"
 
-    # 预分词
-    # 1. 按照特殊标记分割文档
-    if special_tokens:
-        # 先转义再分割多个特殊标记
-        pattern = "|".join(re.escape(token) for token in special_tokens)
-        # 分割文档，保留特殊标记
-        parts = re.split(f"({pattern})", text)
-        # print(parts)
-    else:
-        parts = [text]
+    # 1. Compute word counts
+    from cs336_basics.pretokenization import get_word_counts_parallel
 
-    # 2. GPT-2 Regex splitting on non-special parts
-    gpt2_pat = re.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
+    total_word_counts = get_word_counts_parallel(str(input_path), special_tokens)
 
-    word_counts = defaultdict(int)
-    special_tokens_set = set(special_tokens)
+    # 2. Prepare data for C++
+    # Sort by count descending, then by word ascending (for determinism)
+    sorted_items = sorted(total_word_counts.items(), key=lambda x: (-x[1], x[0]))
+    distinct_words = [w for w, c in sorted_items]
+    counts = [c for w, c in sorted_items]
 
-    for part in parts:
-        # 跳过含有特殊标记的部分
-        if part in special_tokens_set:
-            continue
-        # 找到匹配的
-        words = gpt2_pat.findall(part)
-        for word in words:
-            # We encode to UTF-8 bytes because C++ expects bytes
-            # 编码为 utf8 记录到字典中
-            word_counts[word.encode("utf-8")] += 1
+    # Load C++ library
+    cpp_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../cpp"))
+    header_path = os.path.join(cpp_dir, "bpe.hpp")
+    lib_path = os.path.join(cpp_dir, "build/libbpe.dylib")
 
-    # 统计词和词频
-    distinct_words = list(word_counts.keys())
-    counts = list(word_counts.values())
+    if not os.path.exists(lib_path):
+        raise RuntimeError(f"Library not found at {lib_path}. Please run cmake & make in cpp/build.")
 
-    # 调用cpp
+    try:
+        cppyy.include(header_path)
+        cppyy.load_library(lib_path)
+    except Exception as e:
+        # It might be already loaded
+        pass
+
+    # Call C++ train
     result = cppyy.gbl.bpe.train(distinct_words, counts, vocab_size, special_tokens)
 
-    # 将结果转为 Python 里的 bytes
+    # Convert results back to Python
     vocab = {}
     for item in result.vocab:
         vocab[item.first] = bytes(item.second)

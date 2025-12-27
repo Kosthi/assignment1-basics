@@ -589,7 +589,7 @@ def run_train_bpe(
      # Use all available CPU cores for pre-tokenization
     cpu_cores = min(multiprocessing.cpu_count(), 16)
     print(f"Using {cpu_cores} cores for pre-tokenization")
-    total_word_counts = get_word_counts_parallel(str(input_path), special_tokens)
+    total_word_counts = get_word_counts_parallel(str(input_path), special_tokens, cpu_cores)
 
     # 2. Prepare data for C++
     # Sort by count descending, then by word ascending (for determinism)

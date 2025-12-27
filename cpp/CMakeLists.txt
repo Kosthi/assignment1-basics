@@ -5,7 +5,15 @@ project(bpe_train)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native")
 
-add_library(bpe SHARED bpe.cpp)
+# Find pybind11
+execute_process(COMMAND "python3" -m pybind11 --cmakedir
+                OUTPUT_VARIABLE PYBIND11_CMAKE_DIR
+                OUTPUT_STRIP_TRAILING_WHITESPACE)
+list(APPEND CMAKE_PREFIX_PATH "${PYBIND11_CMAKE_DIR}")
+find_package(pybind11 REQUIRED)
+
+pybind11_add_module(bpe bpe.cpp)
+target_compile_definitions(bpe PRIVATE BUILD_PYTHON_MODULE)
 add_executable(bpe_cpp bpe.cpp)
 
 # OpenMP configuration

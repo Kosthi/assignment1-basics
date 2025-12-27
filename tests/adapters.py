@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import sys
-import ctypes
 from collections.abc import Iterable
 import multiprocessing
 from typing import IO, Any, BinaryIO
@@ -12,7 +11,6 @@ import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 import regex as re
-import cppyy
 
 
 def run_linear(
@@ -566,21 +564,14 @@ def get_tokenizer(
     """
     raise NotImplementedError
 
- # Load C++ library
-cpp_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../cpp"))
-header_path = os.path.join(cpp_dir, "bpe.hpp")
-lib_ext = ".dylib" if sys.platform == "darwin" else ".so"
-lib_path = os.path.join(cpp_dir, f"build/libbpe{lib_ext}")
+ # Pybind11 setup
+cpp_build_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../cpp/build"))
+if cpp_build_dir not in sys.path:
+    sys.path.append(cpp_build_dir)
 
 try:
-    if sys.platform != "darwin":
-        # On Linux, we need to load the library with RTLD_GLOBAL to ensure
-        # that symbols like std::allocator are visible to the JIT.
-        ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
-    cppyy.include(header_path)
-    cppyy.load_library(lib_path)
-except Exception as e:
-    # It might be already loaded or fail if library is missing
+    import bpe
+except ImportError:
     pass
 
 def run_train_bpe(
@@ -596,7 +587,7 @@ def run_train_bpe(
     from cs336_basics.pretokenization import get_word_counts_parallel
 
      # Use all available CPU cores for pre-tokenization
-    cpu_cores = multiprocessing.cpu_count()
+    cpu_cores = min(multiprocessing.cpu_count(), 16)
     print(f"Using {cpu_cores} cores for pre-tokenization")
     total_word_counts = get_word_counts_parallel(str(input_path), special_tokens)
 
@@ -606,33 +597,7 @@ def run_train_bpe(
     distinct_words = [w for w, c in sorted_items]
     counts = [c for w, c in sorted_items]
 
-    # Load C++ library
-    cpp_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../cpp"))
-    header_path = os.path.join(cpp_dir, "bpe.hpp")
-    lib_ext = ".dylib" if sys.platform == "darwin" else ".so"
-    lib_path = os.path.join(cpp_dir, f"build/libbpe{lib_ext}")
-
-    if not os.path.exists(lib_path):
-        raise RuntimeError(f"Library not found at {lib_path}. Please run cmake & make in cpp/build.")
-
-    # Ensure library is loaded (if it wasn't loaded at import time)
-    try:
-        if sys.platform != "darwin":
-            ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
-        cppyy.load_library(lib_path)
-    except Exception:
-        pass
-
     # Call C++ train
-    result = cppyy.gbl.bpe.train(distinct_words, counts, vocab_size, special_tokens)
+    result = bpe.train(distinct_words, counts, vocab_size, special_tokens)
 
-    # Convert results back to Python
-    vocab = {}
-    for item in result.vocab:
-        vocab[item.first] = bytes(item.second)
-
-    merges = []
-    for p in result.merges:
-        merges.append((bytes(p.first), bytes(p.second)))
-
-    return vocab, merges
+    return result.vocab, result.merges

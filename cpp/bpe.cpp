@@ -1,5 +1,11 @@
 #include "bpe.hpp"
 
+#ifdef BUILD_PYTHON_MODULE
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
+namespace py = pybind11;
+#endif
+
 #include <iostream>
 #include <vector>
 #include <string>
@@ -430,3 +436,31 @@ int main() {
 
     return 0;
 }
+
+#ifdef BUILD_PYTHON_MODULE
+PYBIND11_MODULE(bpe, m) {
+    m.doc() = "BPE training module";
+
+    py::class_<bpe::Result>(m, "Result")
+        .def_property_readonly("vocab", [](const bpe::Result &r) {
+            py::dict d;
+            for (const auto &kv : r.vocab) {
+                d[py::int_(kv.first)] = py::bytes(kv.second);
+            }
+            return d;
+        })
+        .def_property_readonly("merges", [](const bpe::Result &r) {
+            py::list l;
+            for (const auto &p : r.merges) {
+                l.append(py::make_tuple(py::bytes(p.first), py::bytes(p.second)));
+            }
+            return l;
+        });
+
+    m.def("train", &bpe::train, "Train BPE",
+          py::arg("distinct_words"),
+          py::arg("counts"),
+          py::arg("vocab_size"),
+          py::arg("special_tokens"));
+}
+#endif

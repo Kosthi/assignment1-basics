@@ -8,6 +8,7 @@ from typing import IO, Any, BinaryIO
 import time
 from cs336_basics.pretokenization import get_word_counts_parallel
 from cs336_basics.BPETokenizer import BPETokenizer
+from cs336_basics.Linear import Linear
 
 import numpy.typing as npt
 import torch
@@ -34,8 +35,13 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
+    # return in_features @ weights.T
+    state_dict = {"W": weights}
 
-    raise NotImplementedError
+    linear_layer = Linear(d_in, d_out)
+    linear_layer.load_state_dict(state_dict)
+
+    return linear_layer(in_features)
 
 
 def run_embedding(

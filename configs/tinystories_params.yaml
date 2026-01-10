@@ -1,6 +1,6 @@
 train:
-  train_data: data/train.bin
-  valid_data: data/valid.bin
+  train_data: data/tinystories/train.bin
+  valid_data: data/tinystories/valid.bin
   data_dtype: uint16
   out_dir: runs/exp_train
   resume_from: null
@@ -16,7 +16,7 @@ train:
   optimizer: adamw
   learning_rate: 0.001
   min_learning_rate: 0.0001
-  warmup_iters: 300
+  warmup_iters: 400
   cosine_cycle_iters: null
   beta1: 0.9
   beta2: 0.999
@@ -50,7 +50,7 @@ train-from-text:
   valid_text: data/TinyStoriesV2-GPT4-valid.txt
   special_tokens: ["<|endoftext|>"]
   data_dtype: uint16
-  out_dir: runs/exp_tft
+  out_dir: runs/exp_train
   overwrite: false
   resume_from: null
   encode_workers: 8
@@ -100,8 +100,8 @@ train-from-text:
 
 generate:
   checkpoint: runs/exp_train/checkpoint_final.pt
-  vocab_path: runs/exp_tft/vocab.json
-  merges_path: runs/exp_tft/merges.txt
+  vocab_path: runs/exp_train/vocab.json
+  merges_path: runs/exp_train/merges.txt
   special_tokens: ["<|endoftext|>"]
 
   context_length: 256

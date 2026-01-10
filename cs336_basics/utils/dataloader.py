@@ -43,7 +43,7 @@ class DataLoader:
         elif isinstance(dataset, np.ndarray):
             # 如果直接是numpy数组，直接使用
             # print(f"直接使用numpy数组")
-            self.data = dataset.astype(dtype)
+            self.data = dataset.astype(dtype, copy=False)
             self.data_source = "array"
         else:
             raise TypeError(f"dataset必须是字符串（文件路径）或numpy数组，但得到 {type(dataset)}")

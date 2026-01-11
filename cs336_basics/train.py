@@ -39,6 +39,30 @@ def loss_per_token(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     return loss
 
 
+def _read_wandb_run_id_from_file(path: Path) -> str | None:
+    try:
+        run_id = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    return run_id or None
+
+
+def _read_wandb_run_id_from_checkpoint(path: str | Path) -> str | None:
+    try:
+        checkpoint = torch.load(path, map_location="cpu")
+    except Exception:
+        return None
+    if not isinstance(checkpoint, dict):
+        return None
+    run_id = checkpoint.get("wandb_run_id")
+    if run_id:
+        return str(run_id)
+    config = checkpoint.get("config")
+    if isinstance(config, dict) and config.get("wandb_run_id"):
+        return str(config["wandb_run_id"])
+    return None
+
+
 @torch.no_grad()
 def eval_loss(
     model: torch.nn.Module,
@@ -202,9 +226,26 @@ def train(args: argparse.Namespace) -> None:
     if args.wandb_project:
         import wandb
 
+        wandb_resume_id = None
+        if args.resume_from:
+            wandb_resume_id = _read_wandb_run_id_from_checkpoint(args.resume_from)
+            if wandb_resume_id is None:
+                wandb_resume_id = _read_wandb_run_id_from_file(
+                    Path(args.resume_from).resolve().parent / "wandb_run_id.txt"
+                )
+        if wandb_resume_id is None:
+            wandb_resume_id = _read_wandb_run_id_from_file(out_dir / "wandb_run_id.txt")
+
+        wandb_init_kwargs: dict[str, Any] = {
+            "project": args.wandb_project,
+            "name": args.wandb_name,
+        }
+        if wandb_resume_id:
+            wandb_init_kwargs["id"] = wandb_resume_id
+            wandb_init_kwargs["resume"] = "must" if args.resume_from else "allow"
+
         wandb_run = wandb.init(
-            project=args.wandb_project,
-            name=args.wandb_name,
+            **wandb_init_kwargs,
             config={
                 "vocab_size": args.vocab_size,
                 "context_length": args.context_length,
@@ -232,6 +273,10 @@ def train(args: argparse.Namespace) -> None:
                 "device": device,
             },
         )
+        if wandb_run and getattr(wandb_run, "id", None):
+            wandb_run_id = str(wandb_run.id)
+            ckpt_config["wandb_run_id"] = wandb_run_id
+            (out_dir / "wandb_run_id.txt").write_text(wandb_run_id + "\n", encoding="utf-8")
 
     start_time = time.time()
     last_log_time = start_time

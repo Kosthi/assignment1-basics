@@ -23,7 +23,8 @@ class Linear(nn.Module):
         W = torch.empty(out_features, in_features, device=device, dtype=dtype)
         # 使用截断正态分布初始化权重
         # 均值为0，标准差为0.02，截断范围通常为[-2*std, 2*std]
-        init.trunc_normal_(W, mean=0.0, std=0.02, a=-0.04, b=0.04)
+        std = (2.0 / (in_features + out_features)) ** 0.5
+        init.trunc_normal_(W, mean=0.0, std=std, a=-3 * std, b=3 * std)
         # 将权重包装为 nn.Parameter
         self.W = nn.Parameter(W)
 

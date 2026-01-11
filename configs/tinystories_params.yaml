@@ -1,9 +1,9 @@
 train:
-  train_data: data/tinystories/train.bin
-  valid_data: data/tinystories/valid.bin
+  train_data: /root/autodl-tmp/tinystories/train.bin
+  valid_data: /root/autodl-tmp/tinystories/valid.bin
   data_dtype: uint16
-  out_dir: runs/exp_train
-  resume_from: null
+  out_dir: /root/autodl-tmp/runs/exp_train_lr3e-3-min3e-5-15000-3
+  resume_from: /root/autodl-tmp/runs/exp_train_lr3e-3-min3e-5-15000-3/checkpoint_step_10000.pt
 
   vocab_size: 10000
   context_length: 256
@@ -14,9 +14,9 @@ train:
   rope_theta: 10000.0
 
   optimizer: adamw
-  learning_rate: 0.001
-  min_learning_rate: 0.0001
-  warmup_iters: 400
+  learning_rate: 3e-3
+  min_learning_rate: 3e-5
+  warmup_iters: 750
   cosine_cycle_iters: null
   beta1: 0.9
   beta2: 0.999
@@ -25,11 +25,11 @@ train:
   grad_clip: 1.0
 
   batch_size: 32
-  max_steps: 4000
+  max_steps: 15000
   log_interval: 10
-  eval_interval: 200
+  eval_interval: 2000
   eval_iters: 50
-  ckpt_interval: 500
+  ckpt_interval: 5000
 
   no_rmsnorm: false
   norm_style: pre
@@ -38,12 +38,12 @@ train:
 
   device: auto
   seed: 42
-  matmul_precision: null
+  matmul_precision: high
   compile: false
   compile_backend: null
 
-  wandb_project: ""
-  wandb_name: null
+  wandb_project: "tinystories"
+  wandb_name: exp_train_lr3e-3-min3e-5-15000-3
 
 train-from-text:
   train_text: data/TinyStoriesV2-GPT4-train.txt
@@ -95,8 +95,8 @@ train-from-text:
   compile: false
   compile_backend: null
 
-  wandb_project: ""
-  wandb_name: null
+  wandb_project: "tinystories"
+  wandb_name: exp_train_lr3e-3-min3e-5-15000-2
 
 generate:
   checkpoint: runs/exp_train/checkpoint_final.pt

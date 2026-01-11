@@ -16,12 +16,8 @@ class RMSNorm(nn.Module):
         super().__init__()
         # 创建权重参数 W，形状为 (d_model,)
         # 使用指定的设备和数据类型
-        W = torch.empty(d_model, device=device, dtype=dtype)
-        # 使用截断正态分布初始化权重
-        # 均值为0，标准差为0.02，截断范围通常为[-2*std, 2*std]
-        init.trunc_normal_(W, mean=0.0, std=0.02, a=-0.04, b=0.04)
         # 将权重包装为 nn.Parameter
-        self.W = nn.Parameter(W)
+        self.W = nn.Parameter(torch.ones(d_model, device=device, dtype=dtype))
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

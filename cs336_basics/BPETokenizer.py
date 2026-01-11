@@ -237,7 +237,7 @@ class BPETokenizer:
             for token_id in self.encode(buffer):
                 yield token_id
 
-    def _find_last_boundary(self, text: str, max_lookback: int = 100) -> int:
+    def _find_last_boundary(self, text: str, max_lookback: int = 50) -> int:
         """
         在文本中查找最后一个合适的分词边界。
 
@@ -251,17 +251,14 @@ class BPETokenizer:
         # 限制回溯长度以避免性能问题
         lookback_text = text[-max_lookback:] if len(text) > max_lookback else text
 
-        # 查找最后一个空白字符或标点作为边界
+        # 查找最后一个空白字符作为边界，并把空白留给下一段
         for i in range(len(lookback_text) - 1, -1, -1):
             char = lookback_text[i]
-            if char.isspace() or char in ".,!?;:":
-                # 计算在原始文本中的位置
-                boundary_pos = len(text) - len(lookback_text) + i + 1
+            if char.isspace():
+                boundary_pos = len(text) - len(lookback_text) + i
                 return boundary_pos
 
-        # 如果没有找到边界，回退到处理整个文本
-        # 这可能会导致跨块边界的token，但在实际使用中应该很少发生
-        return len(text)
+        return 0
 
     def decode(self, ids: list[int]) -> str:
         """

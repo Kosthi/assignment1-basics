@@ -251,7 +251,7 @@ class BPETokenizer:
         # 限制回溯长度以避免性能问题
         lookback_text = text[-max_lookback:] if len(text) > max_lookback else text
 
-        # 查找最后一个空白字符作为边界，并把空白留给下一段
+        # 查找最后一个空格作为边界，并把空格留给下一段
         for i in range(len(lookback_text) - 1, -1, -1):
             char = lookback_text[i]
             if char.isspace():
